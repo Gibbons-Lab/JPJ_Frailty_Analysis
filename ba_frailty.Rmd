@@ -1,0 +1,348 @@
+---
+title: "Frailty Analysis - Gut Microbiome - 8-30-2024"
+author: "Johannes P. Johnson-Martinez (a.k.a. James Johnson), PhD"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+#load some useful libraries
+library(limma)
+library(edgeR)
+library(sns)
+library(data.table)
+library(tidyr)
+#library(tidyverse)
+library(sjmisc)
+require(foreign)
+library(foreign)
+require(ggplot2)
+require(MASS)
+require(Hmisc)
+require(reshape2)
+library(stringr)
+library(rlist)
+library(rlang)
+library(forcats)
+library(dplyr)
+library(ggh4x)
+require(tidyselect)
+library(DataCombine)
+library(ggrepel)
+library(ggbeeswarm)
+library(ggsignif)
+library(ggpubr)
+#library(btools)
+library(ggpmisc)
+library(quantreg)
+library(broom)
+library(gginnards)
+library(broom.mixed)
+library(scales)
+library(sommer)
+library(gplots)
+library(ggbreak)
+library(ggrepel)
+library(stringr)
+#Corncob and Phyloseq:
+library(corncob)
+library(compositions)
+library(phyloseq)
+```
+
+```{r}
+# Load the frailty output df with gut microbiome data from Python preprocessing:
+frailty <- read.csv("ba_frailty.csv")
+taxonomy <- read.csv('taxonomy.csv', sep="\t")
+rownames(taxonomy) <- colnames(frailty[,143:ncol(frailty)])
+frailty <- frailty[!duplicated(frailty$public_client_id),]
+frailty$public_client_id <- factor(frailty$public_client_id)
+frailty$sex <- factor(frailty$sex)
+names(frailty)[143:ncol(frailty)] <- sapply(str_remove_all(names(frailty)[143:ncol(frailty)],"X"),"[") 
+
+# initial frailty and taxonomy dfs:
+frailty
+taxonomy
+```
+
+
+```{r}
+labs_list <- c("ALAT..SGPT.","ALBUMIN","ALKALINE.PHOSPHATASE","BILIRUBIN..TOTAL","CALCIUM","CARBON.DIOXIDE..CO2.","CHLORIDE","CHOLESTEROL..TOTAL","CREATININE.ENZ..SER","CRP.HIGH.SENSITIVITY","FERRITIN","GLOBULIN","GLUCOSE","GLYCOHEMOGLOBIN.A1C","HDL.CHOL.DIRECT","INSULIN","LDL.CHOL.CALCULATION","LINOLEIC_ACID","OMEGA.3.INDEX","POTASSIUM","PROTEIN","SODIUM","TRIGLYCERIDES","UREA.NITROGEN","URIC.ACID","VITAMIN.D..25.OH.TOT")
+frailty_wolabs <- frailty[,c(143:ncol(frailty))] 
+frailty_wlabs <- frailty[,c(labs_list)]
+frailty <- cbind(frailty[,c(1:14)],frailty$vendor_dashboard,frailty_wlabs,frailty_wolabs)
+frailty
+
+wrap_strings  <- function(vector_strings,width){as.character(sapply(vector_strings,FUN=function(x){paste(strwrap(x,width=width), collapse="\n")}))}
+
+names(frailty)[15] <- 'vendor_dashboard'
+frailty
+```
+
+```{r}
+otus <- frailty
+otus <- otus[which(otus$vendor_dashboard == "Second Genome" | otus$vendor_dashboard == "research-microbiome"),] # keep only data where vendor is explicit
+otus$vendor_dashboard = str_replace_all(otus$vendor_dashboard,"research-microbiome","DNA Genotek")
+#otus$S.equol <- factor(otus$S.equol)
+# Algorithms based on ones provided by Christian Diener, PhD:
+##############################################################################
+df <- otus
+df <- df[!duplicated(df$public_client_id),]
+otus <- otus[!duplicated(otus$public_client_id),]
+rownames(otus) <- otus$public_client_id
+otus <- otus[42:ncol(otus)]
+taxa_matrix <- as.matrix(taxonomy)
+rownames(df) <- df$public_client_id
+sdata <- df[, c(1:41)]
+#rownames(taxa_matrix) <- names(otus)
+#rownames(otus) <- NULL
+sdata
+```
+
+
+```{r}
+colnames(otus) <- gsub("taxa_", "", colnames(otus))
+colnames(df) <- gsub("taxa_", "", colnames(df))
+colnames(taxa_matrix) <- gsub("taxa_","", colnames(taxa_matrix))
+colnames(frailty) <- gsub('taxa_','', colnames(frailty))
+rownames(taxonomy) <- gsub('taxa_','', colnames(otus))
+rownames(taxa_matrix) <- gsub("taxa_","", rownames(taxa_matrix))
+as.data.frame(taxa_matrix)
+taxa_matrix
+taxonomy
+otus
+df
+sdata
+
+```
+```{r}
+library(stringr)
+frailty$public_client_id <- str_pad(frailty$public_client_id, width = 8, pad = "0")
+frailty
+```
+
+
+```{r}
+stopifnot(all(rownames(otus) %in% rownames(sdata)))
+stopifnot(nrow(otus) == nrow(sdata))
+print("sample names match")
+
+stopifnot(all(colnames(otus) %in% rownames(taxonomy)))
+stopifnot(ncol(otus) == nrow(taxa_matrix))
+stopifnot(!anyDuplicated(taxa_matrix))
+print("taxa look okay")
+
+stopifnot(!anyDuplicated(sdata))
+print("sample data looks okay")
+```
+
+
+```{r}
+ps <- phyloseq(
+  otu_table(otus, taxa_are_rows = FALSE),
+  tax_table(taxa_matrix),
+  sample_data(sdata)
+)
+
+ps
+
+names(sample_data(ps))
+```
+
+
+
+```{r}
+fa <- differentialTest(formula = ~ merge_fi + BMI_CALC + sex + age + PC1 + PC2 + PC3 + PC4 + vendor_dashboard,
+                                phi.formula = ~ 1,
+                                formula_null = ~ BMI_CALC + sex + age + PC1 + PC2 + PC3 + PC4 + vendor_dashboard,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+
+
+```
+
+
+
+```{r}
+#saveRDS(fa, "frailty.rds")
+fa <- readRDS("frailty.rds")
+
+fa$significant_taxa
+```
+
+
+```{r}
+# Read the data from the CSV file
+df_matrix <- frailty
+  #p_df[which(p_df$Adj.P <= 0.05),]
+working_set_list <- colnames(df_matrix)[42:ncol(df_matrix)]
+
+# Select the columns that contain the taxa data
+keep_cols <- working_set_list
+
+# Create a new data frame that only contains the selected columns
+df_matrix_filtered <- df_matrix[,keep_cols]
+
+# Add the BMF status column to the new data frame
+df_matrix_filtered <- cbind(df_matrix[,1],df_matrix[,10],df_matrix_filtered)
+names(df_matrix_filtered)[1:2] <- c('public_client_id','frailty index')
+
+# Convert the set$Genera vector to a vector of characters
+set_genera_characters <- unlist(working_set_list)
+
+# Filter the df_matrix data frame to only include the taxa that are present in the set of genera that are being studied
+vec <- c()
+for (i in 1:length(fa$significant_taxa)) {
+  vec[length(vec)+1] <- strsplit(fa$significant_taxa,".",fixed=TRUE)[[i]][6]
+}
+vec
+```
+```{r}
+frailty
+rownames(frailty) <- frailty$public_client_id
+
+```
+
+
+
+```{r}
+vars <- c('age','merge_fi','BMI_CALC','butyrate','propionate','min_bray',"ALAT..SGPT.", "ALBUMIN","BILIRUBIN..TOTAL","CALCIUM","CARBON.DIOXIDE..CO2.","CHOLESTEROL..TOTAL","CREATININE.ENZ..SER","CRP.HIGH.SENSITIVITY","GLOBULIN","GLUCOSE","GLYCOHEMOGLOBIN.A1C","HDL.CHOL.DIRECT","INSULIN","LDL.CHOL.CALCULATION","OMEGA.3.INDEX","POTASSIUM","PROTEIN","SODIUM","TRIGLYCERIDES","UREA.NITROGEN","URIC.ACID","VITAMIN.D..25.OH.TOT")
+```
+
+
+```{r}
+df_matrix <- df_matrix[complete.cases(df_matrix),]
+df_matrix <- df_matrix[sapply(df_matrix, is.numeric),]
+df_matrix
+```
+
+
+```{r}
+# Create a linear model of SCFA flux vs frailty
+library(lmtest)
+# Perform the regression
+model <- lm(butyrate ~ merge_fi + sex + age + BMI_CALC + PC1 + PC2 + PC3 + PC4, data = df_matrix)
+
+# Display the summary statistics
+summary(model)
+
+```
+
+
+```{r}
+# Correcting the taxa and vars labels
+remove <- c()
+remove_dots <- c()
+taxa_final <- c()
+taxa_dots_final <- c()
+
+taxa <- paste0("taxa_", rownames(taxa))
+
+for (i in seq(1:length(fa$significant_taxa))) { 
+  taxon <- strsplit(fa$significant_taxa[i],'.',fixed=TRUE)[[1]][6]
+  taxon_dots <- fa$significant_taxa[i]
+  if (str_contains(taxon,"nan")) {
+    remove[length(remove)+1] <- taxon
+    remove_dots[length(remove_dots)+1] <- taxon_dots
+  } else {
+    taxa_final[length(taxa_final)+1] <- taxon
+    taxa_dots_final[length(taxa_dots_final)+1] <- taxon_dots
+  }
+}
+
+taxa_list <- taxa_final
+taxa_list <- taxa_list[!(taxa_list %in% remove)]
+taxa <- taxa_dots_final
+taxa <- taxa[!(taxa %in% remove_dots)]
+taxa
+```
+```{r}
+taxa_list
+```
+
+
+```{r}
+df_taxa <- df_matrix[, taxa]
+df_vars <- df_matrix[, vars]
+correlations <- matrix(NA, nrow=length(taxa), ncol=length(vars))
+
+# Compute correlations
+for (i in seq_along(taxa)) {
+  for (j in seq_along(vars)) {
+    # Ensure the columns are numeric
+    if (is.numeric(df_taxa[, i]) && is.numeric(df_vars[, j])) {
+      # Remove NA values
+      taxa_vector <- na.omit(df_taxa[, i])
+      vars_vector <- na.omit(df_vars[, j])
+      # Check for constant columns
+      if (sd(taxa_vector) != 0 && sd(vars_vector) != 0) {
+        correlations[i, j] <- cor(taxa_vector, vars_vector)
+      } else {
+        correlations[i, j] <- NA
+      }
+    } else {
+      correlations[i, j] <- NA
+    }
+  }
+}
+
+vars <- c('age','frailty index', 'BMI','butyrate flux', 'propionate flux','Bray-Curtis Uniqueness',"alanine transaminase\n(ALT/SGPT)", "albumin","bilirubin total","calcium","CO2","total cholesterol","creatinine","C-reactive protein (CRP)","globulin","glucose","glycohemoglobin A1c (HbA1C)","HDL","insulin","LDL","omega-3\nindex","potassium","protein","sodium","triglycerides","urea nitrogen","uric acid","Vitamin D-25 OH total")
+
+
+correlations
+
+```
+
+
+```{r}
+
+dist_matrix_rows <- dist(correlations)  # Compute distance matrix for rows
+dist_matrix_cols <- dist(t(correlations))  # Compute distance matrix for columns
+
+rownames(correlations) <- taxa_list
+colnames(correlations) <- vars
+
+
+hclust_rows <- hclust(dist_matrix_rows)  # Perform hierarchical clustering on rows
+hclust_cols <- hclust(dist_matrix_cols)  # Perform hierarchical clustering on columns
+
+# Load the necessary library
+library(gplots)
+library(gridGraphics)
+
+
+rownames(correlations) <- wrap_strings(rownames(correlations),35)
+
+# Generate the heatmap with hierarchical clustering
+png("frailty_hm.png", width = 4400, height = 6000, res = 300)
+heatmap.2(correlations, 
+          main = "Correlation Heatmap", 
+          notecol="black",      # change font color of cell labels to black
+          density.info="none",  # turns off density plot inside heatmap
+          trace="none",         # turns off trace lines inside the heatmap
+          cexRow = 0.5,
+          margins = c(12,9),    # widens margins around plot
+          col = colorRampPalette(c("blue", "white", "red"))(25),  # color scheme
+          Rowv = TRUE,          # enable hierarchical clustering for rows
+          Colv = TRUE)          # enable hierarchical clustering for columns
+dev.off()
+```
+
+```{r}
+ggplot(data = df_matrix, aes(x = butyrate, y = min_bray)) + geom_beeswarm() + xlab("butyrate\nflux") + ylab('Bray-Curtis Uniqueness') + ggtitle('Arivale (N = 1204)')
+ggplot(data = df_matrix, aes(x = butyrate, y = min_wunifrac)) + geom_beeswarm() + xlab("butyrate\nflux") + ylab('Weighted-UniFrac Uniqueness') + ggtitle('Arivale (N = 1204)')
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

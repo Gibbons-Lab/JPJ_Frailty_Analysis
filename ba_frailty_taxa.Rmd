@@ -1,0 +1,1035 @@
+---
+title: "ASV Gut Microbiome CORNCOB Regression & Metals Analysis - James Johnson - v3-16-23"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+#load some useful libraries
+library(limma)
+library(edgeR)
+library(sns)
+library(data.table)
+library(tidyr)
+#library(tidyverse)
+library(sjmisc)
+require(foreign)
+library(foreign)
+require(ggplot2)
+require(MASS)
+require(Hmisc)
+require(reshape2)
+library(stringr)
+library(rlist)
+library(rlang)
+library(forcats)
+library(dplyr)
+library(ggh4x)
+require(tidyselect)
+library(DataCombine)
+library(ggrepel)
+library(ggbeeswarm)
+library(ggsignif)
+library(ggpubr)
+#library(btools)
+library(ggpmisc)
+library(quantreg)
+library(broom)
+library(gginnards)
+library(broom.mixed)
+library(scales)
+library(sommer)
+library(gplots)
+library(ggbreak)
+library(ggrepel)
+library(stringr)
+#Corncob and Phyloseq:
+library(corncob)
+library(compositions)
+library(phyloseq)
+```
+
+```{r}
+frailty <- read.csv("ba_frailty_met.csv")
+taxonomy <- read.csv('taxonomy.csv', sep="\t")
+frailty$public_client_id <- factor(frailty$public_client_id)
+frailty$sex <- factor(frailty$sex)
+names(frailty)[142:ncol(frailty)] <- sapply(str_remove_all(names(frailty)[142:ncol(frailty)],"X"),"[") 
+
+labs_list <- names(frailty[,c(1,15:ncol(frailty))])[c(2,3,4,13,15,16,17,18,20,21,28,33,34,36,37,51,63,66,86,96,98,107,112,114,115,116)]
+frailty_labs <- frailty[,names(frailty) %in% labs_list]
+frailty_cov <- frailty[,c(1:14)]
+frailty_count <- frailty[,c(142:ncol(frailty))]
+frailty <- cbind(frailty_cov,frailty_labs,frailty_count)
+names(frailty)[15:40] <- c("alanine transaminase\n(ALT/SGPT)", "albumin","bilirubin total","calcium","CO2","total cholesterol","creatinine","C-reactive protein (CRP)","globulin","glucose","glycohemoglobin A1c (HbA1C)","HDL","insulin","LDL","omega-3\nindex","potassium","protein","sodium","triglycerides","urea nitrogen","uric acid","Vitamin D-25 OH total")
+labs_list <- names(frailty)[15:40]
+names(frailty)[12:14] <- c('frailty index', 'Shannon Diversity', 'BMI')
+
+```
+
+
+```{r}
+
+# Import data
+meta <- read.csv(file = '../../../Finished_Projects/Generally-Healthy-Cohort-BMF/Metabolomics_Data/metabolomics_fullmetadata.csv')
+countdf <- t(as.matrix(frailty[,41:ncol(frailty)]))
+#frailty$sex <- factor(frailty$sex)
+
+# Design linear regression models using lmFit and eBayes with help LIMMA
+# This code adapted from Christian Diener, PhD:
+design <- model.matrix(~get('frailty index') + age + BMI + sex + PC1 + PC2 + PC3 + PC4, frailty) # Covariates: sex, age, BMI, eGFR
+dge <- DGEList(counts=countdf)  # Where `count_matrix` is the matrix mentioned above
+#dge <- calcNormFactors(dge)  # Normalize the matrix (this step only for CORNCOB/microbiome data)
+logCPM <- cpm(dge, log=TRUE)  # Takes the log of the data
+fit <- lmFit(logCPM, design)  # Fits the model for all metabolites
+fit <- eBayes(fit)  # Stabilizes the variances
+```
+
+
+```{r}
+#Get results table for Constipation coefficient relative to High Normal BMF:
+names(frailty)[41:ncol(frailty)] <- meta$BIOCHEMICAL_NAME
+re_frailty <- topTable(fit, coef = 2, genelist = names(frailty)[41:ncol(frailty)], sort="p", number="none")  # Select the significant models by coefficient 2
+
+
+indices <- match(rownames(re_frailty), meta$CHEMICAL_ID) # associate column of labs names with index of lab
+re_frailty[1] <- names(frailty)[41:ncol(frailty)][indices] # associate the labs names with the labs indices
+names(re_frailty)[1] <- 'BIOCHEMICAL_NAME'
+p_frailty <- re_frailty[re_frailty$adj.P.Val < 0.05,] # create df of just significant adj P value results
+p_frailty <- p_frailty[order(p_frailty$adj.P.Val),] # order by adj P value
+#p_const <- p_const[,c('logFC','B','adj.P.Val','ID','P.Value')] # keep only desired columns
+
+sig_frailty <- p_frailty[which(p_frailty$adj.P.Val < 0.05),]
+select_frailty <- cbind(frailty[,1:40],frailty[,names(frailty) %in% sig_frailty$BIOCHEMICAL_NAME])
+names(select_frailty)[6:9] <- c('Bray-Curtis Uniqueness','Weighted UNIFRAC Uniqueness','butyrate flux', 'propionate flux')
+select_frailty
+
+```
+
+```{r}
+select_frailty
+```
+
+
+
+```{r}
+# Read the data from the CSV file
+df_matrix <- select_frailty
+  #p_df[which(p_df$Adj.P <= 0.05),]
+working_set_list <- colnames(df_matrix)[41:ncol(df_matrix)]
+
+# Select the columns that contain the taxa data
+keep_cols <- working_set_list
+
+# Create a new data frame that only contains the selected columns
+df_matrix_filtered <- df_matrix[,keep_cols]
+
+# Add the BMF status column to the new data frame
+df_matrix_filtered <- cbind(df_matrix[,1],df_matrix_filtered)
+names(df_matrix_filtered)[1] <- 'frailty'
+
+# Convert the set$Genera vector to a vector of characters
+set_metab_characters <- unlist(working_set_list)
+
+# Filter the df_matrix data frame to only include the taxa that are present in the set of genera that are being studied
+vec <- names(select_frailty)[41:ncol(select_frailty)]
+
+# Filter the df_matrix data frame to only include the taxa that are present in the set of genera that are being studied
+#df_matrix_filtered <- df_matrix[paste0("taxa_",working_set$Genera)]
+
+```
+
+
+```{r}
+taxa
+vars
+```
+
+
+```{r}
+
+
+# Assuming 'df' is your DataFrame
+vars <- c('age','frailty index','BMI','butyrate flux','propionate flux','Bray-Curtis Uniqueness', labs_list)
+
+df_matrix <- df_matrix[complete.cases(df_matrix),]
+df_matrix <- na.omit(df_matrix)
+#df_matrix <- df_matrix[sapply(df_matrix, is.finite),] 
+df_matrix <- df_matrix[sapply(df_matrix, is.numeric),]
+metab <- colnames(df_matrix)[41:ncol(df_matrix)]
+metab
+df_matrix
+```
+
+
+```{r}
+
+# Assuming df_matrix is your dataframe, taxa and vars are vectors of column names
+# Subset df_matrix for taxa and vars
+df_metab <- df_matrix[, metab]
+df_vars <- df_matrix[, vars]
+
+vars
+metab
+rownames(df_vars) <- NULL
+rownames(df_metab) <- NULL
+
+# Initialize an empty matrix to store correlations
+correlations <- matrix(nrow = length(metab), ncol = length(vars),
+                       dimnames = list(metab, vars))
+
+# Compute correlations
+for (i in seq_along(metab)) {
+  for (j in seq_along(vars)) {
+    # Ensure the columns are numeric
+    if (is.numeric(df_metab[, i]) && is.numeric(df_vars[, j])) {
+      # Remove NA values
+      metab_vector <- na.omit(df_metab[, i])
+      vars_vector <- na.omit(df_vars[, j])
+      # Check for constant columns
+      if (sd(metab_vector) != 0 && sd(vars_vector) != 0) {
+        correlations[i, j] <- cor(metab_vector, vars_vector)
+      } else {
+        correlations[i, j] <- NA
+      }
+    }
+  }
+}
+
+correlations <- na.omit(correlations)
+```
+
+
+```{r}
+# Assuming 'df' is your DataFrame
+df_matrix <- na.omit(df_matrix)  # Remove rows with missing values
+
+# Compute distance matrix for rows and columns
+dist_matrix_rows <- dist(correlations, method = "euclidean")
+dist_matrix_cols <- dist(t(correlations), method = "euclidean")
+
+# Check for NA, NaN, or Inf values in the distance matrices
+if(any(is.na(dist_matrix_rows)) || any(is.na(dist_matrix_cols)) || 
+   any(is.infinite(dist_matrix_rows)) || any(is.infinite(dist_matrix_cols))) {
+  stop("The distance matrices contain NA, NaN, or Inf values.")
+}
+
+# Load the necessary library
+library(gplots)
+library(gridGraphics)
+
+# Generate the heatmap with hierarchical clustering
+png("frailty_hm_met.png", width = 4400, height = 6000, res = 300)
+# Generate the heatmap with hierarchical clustering
+heatmap.2(correlations, 
+          main = "Correlation Heatmap", 
+          notecol="black",      # change font color of cell labels to black
+          density.info="none",  # turns off density plot inside heatmap
+          trace="none",         # turns off trace lines inside the heatmap
+          cexRow = 0.35, # sets row text size to 0.8
+          margins = c(12,9),    # widens margins around plot
+          col = colorRampPalette(c("blue", "white", "red"))(25),  # color scheme
+          Rowv = TRUE,
+          Colv = TRUE,) # enable hierarchical clustering for columns
+
+dev.off()
+
+```
+
+
+```{r}
+# Rename the BMF column
+colnames(df_matrix_filtered)[1] <- 'frailty'
+df_matrix_filtered$frailty <- factor(df_matrix_filtered$merged_fi, levels = c(1,2,3,4), labels = c("Constipation","Low\nNormal", "High\nNormal", "Diarrhea"))
+colnames(df_matrix_filtered)[2:ncol(df_matrix_filtered)] <- vec
+
+df_matrix_filtered
+
+
+# Order the taxon name columns by the Mean.Abundance in the set data frame
+working_set <- working_set[order(-working_set$Mean.Abundance),]
+
+df_matrix_filtered <- cbind(df_matrix_filtered[,1],
+df_matrix_filtered[,match(as.character(working_set$Genus), names(df_matrix_filtered))])
+df_matrix_filtered
+
+#Rename first column 'BMF'
+colnames(df_matrix_filtered)[1] <- 'BMF'
+
+#column 1 is BMF, so we want the matrix of column 2 onward
+z <- df_matrix_filtered
+for (i in 2:ncol(z)) {
+  meanz <- colMeans(as.matrix(z[,2:ncol(z)])) # gets the means of each taxon column and outputs a list where each element is a vector with the taxon name and its mean
+  stdevz <- sd(z[,i]) # gets the stdev of the column
+  for (j in 1:nrow(z)) { # for each row:
+    z[j,i] <- (z[j,i] - meanz[[i-1]])/stdevz # Z-score normalize: z = (z - mean) / stdev
+  }
+}
+
+df_subsets <- split(z, z$BMF) # split the dataframes into ones for each BMF status
+df_subsets
+
+# Create a new data frame with four rows and one column for each taxon in the data
+new_df <- matrix(nrow = 4, ncol = ncol(df_subsets[[1]]) - 1, dimnames = list(c("Constipation", "Low\nNormal", "High\nNormal", "Diarrhea"), colnames(df_subsets[[1]])[-1]))
+
+# Iterate over the df_subsets list and calculate the column-average for each subset data frame
+for (i in 1:length(df_subsets)) {
+  # Calculate the column-average of all the samples in the subset data frame
+  row_mean <- colMeans(df_subsets[[i]][,2:ncol(df_subsets[[i]])])
+  # Assign the column-average to the corresponding row and column in the new data frame
+  new_df[i, ] <- row_mean
+}
+
+rownames(new_df) <- c("Constipation","Low\nNormal","High\nNormal","Diarrhea")
+
+# Convert the new_df object to a data frame
+new_df_df <- as.data.frame(new_df)
+
+# Create the ggplot object
+ggplot <- ggplot(data = new_df_df)
+ggplotcolor_palette <- get("scales", ggplot)
+ggplot_color_palette_vector <- unlist(ggplotcolor_palette)
+
+# Create the heatmap
+hm <- pheatmap(t(new_df_df), 
+               color_palettes_list = ggplot_color_palette_vector, 
+               cellheight = 15, 
+               cellwidth = 100, 
+               display_numbers = FALSE, 
+               gaps_row = c(seq(1:length(colnames(new_df_df)))), 
+               gaps_col = c(seq(1:4)), 
+               border_color = "white",
+               angle_col = "0", 
+               cluster_rows = FALSE, 
+               fontsize_row = 7, 
+               fontsize_col = 10, 
+               cluster_cols = FALSE)
+ggsave(
+  "BMFHM.png",
+  plot = hm,
+  device = NULL,
+  path = NULL,
+  scale = 4,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = FALSE,
+  bg = NULL
+)
+```
+
+
+```{r}
+combinations <- list(c("Low","High"))
+
+#Begin preparing gut microbiome data results for plotting
+#Import gut df for preprocessing:
+
+df_otus <- read_csv('clrtaxa.csv')
+df_otus <- merge(df[,c(1,20:21,25)],df_otus, by = "public_client_id")
+
+df_otus <- cbind(df_otus[,c(1:4)],df_otus[paste0("taxa_",sequol_sexage$significant_taxa)])
+df_otus
+```
+
+
+```{r}
+male_s_equol <- otus[otus$sex == "M",]$S.equol
+female_s_equol <- otus[otus$sex == "F",]$S.equol
+
+# Perform t-test
+test_result <- t.test(male_s_equol, female_s_equol)
+
+# Print the result
+print(test_result)
+
+# Assuming your dataframe is named df, "apoe" is the column with apoe information and "s_equol_level" is the column with s-equol levels
+apoe_homoz <- otus[otus$apoe == "apoe4-homo",]$S.equol
+apoe_heteroz <- otus[otus$apoe == "apoe4-hetero",]$S.equol
+non_apoe4 <- otus[otus$apoe == "non-apoe4",]$S.equol
+
+# Perform ANOVA
+anova_result <- aov(S.equol ~ apoe, data = otus)
+
+# Print the result
+summary(anova_result)
+
+
+```
+
+
+```{r}
+# Create the dfs to store BMF metadata and p values for each hit
+low <- c()
+low_p <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+likelihood <- c()
+adj_p <- c()
+names(sequol_sexage$p) = gsub("nan", "Unclassified", names(sequol_sexage$p))
+
+#Add all the p values and metadata to the right dfs:
+dv_analysis_trim <- sequol_sexage
+dv_analysis_trim$all_models <- dv_analysis_trim$all_models[!is.na(dv_analysis_trim$all_models)]
+dv_analysis_trim$p <- dv_analysis$p[!is.na(dv_analysis_trim$p)]
+dv_analysis_trim$p_fdr <- dv_analysis$p_fdr[!is.na(dv_analysis_trim$p_fdr)]
+
+adj_p <- ifelse(!is.na(dv_analysis_trim$p_fdr[[1]]),dv_analysis_trim$p_fdr[[1]],next)
+low_p <- coef(dv_analysis_trim$all_models[[1]])[3,4]
+low <- coef(dv_analysis_trim$all_models[[1]])[3,1]
+taxa_names <- dv_analysis_trim$significant_taxa[1]
+family_names <- strsplit(taxa_names,'.',fixed=TRUE)[[1]][5]
+genus_names <- strsplit(taxa_names,'.',fixed=TRUE)[[1]][6]
+likelihood <- dv_analysis_trim$all_models[[1]]$logL
+genus_names <- strsplit(taxa_names,'.',fixed=TRUE)[[1]][6]
+
+#Create final p-value df:
+p_df <- bind_cols(taxa_names,family_names,genus_names, likelihood, adj_p, low,low_p)
+names(p_df) <- c("Genera","Family","Genus","LogL","Adj.P","Low.Beta","Low.P.Val")
+p_df$Combined <- paste(p_df$Family,p_df$Genus)
+ab <- colSums(df_otus[names(df_otus) %in% paste("taxa_",names(dv_analysis_trim$p),sep="")])/colSums(!!df_otus[names(df_otus) %in% paste("taxa_",names(dv_analysis_trim$p),sep="")])
+p_df$Mean.Abundance <- ab[paste("taxa_",p_df$Genera,sep="")]
+p_df$Low.Adj.P.Val <- p.adjust(low_p, method = "fdr", n = length(low_p))
+p_df <- p_df %>%
+  group_by(Mean.Abundance)
+
+set <- subset(p_df[which(p_df$Adj.P < 0.05 & p_df$Genus != 'Unclassified'),])
+set <- subset(set[order(-set$Mean.Abundance),])
+
+span <- set
+
+span$Letters <- LETTERS[1:1]
+span
+```
+
+
+```{r}
+sig = function(x){
+  if(x < 0.001){"***"} 
+  else if(x < 0.01){"**"}
+  else if(x < 0.05){"*"}
+  else{NA}}
+
+#use gut df to construct column-specific df for plotting function
+df_test <- df_otus
+comparisons = list(c("Low","High"))
+
+
+cl = function(bmf) {
+    #print(bmf)
+    color_choice <- ifelse(any(str_contains(bmf, c("Low","1",1))),ggthemes::canva_palettes[['Primary colors with a vibrant twist']][c(2)],
+        ifelse(any(str_contains(bmf, c("High","2",2))), ggthemes::canva_palettes[['Primary colors with a vibrant twist']][c(4)],"black"))
+    #print(color_choice)
+    return (color_choice)
+}
+
+df_test$S.equol <- factor(df_test$S.equol, levels = c("Low","High"))
+for (genera in 1:1) {
+  y_name <- paste("taxa_",span$Genera[genera],sep="")
+  myplots[[genera]] <- local({
+    genera <- genera
+    plt <- ggplot(data = df_test, aes(x = S.equol, y = .data[[y_name]])) +
+    geom_jitter(aes(color = sex), size = 0.7, cex = .5) +
+    geom_boxplot(color = "black", linewidth = 0.32, alpha=0.2, outlier.shape = NA, varwidth = FALSE) +
+    ggtitle(label = str_wrap(paste(span$Family[genera],"\n",span$Genus[genera],sep=""), width = 3))+
+        guides(color = guide_legend(override.aes = list(size=8), title.position = 'left', nrow = 1, ncol = 4)) +
+        theme(plot.margin = unit(c(0,1,1,0), "cm"),
+                plot.title = element_text(size=8),
+                #legend.title = element_text(size=10), 
+                #plot.subtitle = element_text(size=10), 
+                #legend.text = element_text(size=7),
+                axis.text.x = element_text(size=10),
+                axis.text.y = element_text(size=10), 
+                #axis.title.y = element_text(size=10),
+                axis.title.x = element_blank())+
+      ylab("CLR Abundance")+
+        scale_fill_manual(limits = c("Low","High"), labels = c("Low","High"), values = ggthemes::canva_palettes[['Primary colors with a vibrant twist']][c(1,2)], drop = FALSE)
+    })
+}
+```
+```{r}
+
+myplots[[1]]
+```
+
+
+
+```{r}
+saveRDS(Cr, "Cr_ageGFR.rds")
+
+Mn <- differentialTest(formula = ~ S-equol + apoe + eGFR + sex + age + BMI_CALC,
+                                phi.formula = ~ 1,
+                                formula_null = ~ sex + BMI_CALC + age + apoe,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+saveRDS(Mn, "Mn_ageGFR.rds")
+
+Co <- differentialTest(formula = ~ Co + age + apoe + eGFR + sex + BMI_CALC,
+                                phi.formula = ~ 1,
+                                formula_null = ~ sex + BMI_CALC,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+saveRDS(Co, "Co_ageGFR.rds")
+
+Ni <- differentialTest(formula = ~ Ni + age + apoe + eGFR + sex + BMI_CALC,
+                                phi.formula = ~ 1,
+                                formula_null = ~ sex + BMI_CALC,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+saveRDS(Ni, "Ni_ageGFR.rds")
+
+As <- differentialTest(formula = ~ As + age + apoe + eGFR + sex + BMI_CALC,
+                                phi.formula = ~ 1,
+                                formula_null = ~ sex + BMI_CALC,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+saveRDS(As, "As_ageGFR.rds")
+
+
+Pb <- differentialTest(formula = ~ Pb + age + apoe + eGFR + sex + BMI_CALC,
+                                phi.formula = ~ 1,
+                                formula_null = ~ sex + BMI_CALC,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+saveRDS(Pb, "Pb_ageGFR.rds")
+
+Cd <- differentialTest(formula = ~ Cd + age + apoe + eGFR + sex + BMI_CALC,
+                                phi.formula = ~ 1,
+                                formula_null = ~ sex + BMI_CALC,
+                                phi.formula_null = ~ 1,
+                                data = ps,
+                                test = "LRT", boot = FALSE,
+                                full_output = TRUE,
+                                fdr_cutoff = 0.05)
+
+saveRDS(Cd, "Cd_ageGFR.rds")
+```
+
+
+```{r}
+Cr$significant_taxa
+```
+
+
+```{r}
+taxa_Cr<-Cr$all_models
+as.data.frame(Cr$p_fdr)
+taxa_p <- DropNA(as.data.frame(Cr$p_fdr), Var = "Cr$p_fdr")
+taxa_p[1]
+taxa_Cr[[1]]$coefficients
+
+df <- dat
+colnames(df) = gsub("nan", "Unclassified", colnames(df))
+df_otus <- dplyr::select(df, -c("public_client_id","BMI_CALC","sex","age","eGFR","vendor_dashboard","apoe","genotyping_technology","rs7412","rs429358","genome_vendor","Cr","Mn","Co","Ni","As","Cd","Pb"))
+
+df_otus <- as.data.frame(clr(as.matrix(df_otus)))
+df_select <- dplyr::select(df, c(1:18))
+df_otus <- cbind(df_select,df_otus)
+df <- df_otus
+
+Cr_beta <- c()
+Crp <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(Cr$p) = gsub("nan", "Unclassified", names(Cr$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(Cr$all_models[names(Cr$p)])) {
+  Crp[i] <- Cr$all_models[[i]]$coefficients[2,4]
+  Cr_beta[i] <- Cr$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(Cr$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- Cr$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+Cr_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, Cr_beta, Crp)
+names(Cr_p) <- c("Genera","Family","Genus","Adj.P","Cr_Beta","Cr_Adj.P")
+Cr_p$Combined <- paste(Cr_p$Family,Cr_p$Genus)
+Cr_p$Cr_Adj.P <- p.adjust(Cr_p$Cr_Adj.P, method = "fdr", n = length(Cr_p$Cr_Adj.P))
+
+
+Cr_p <- Cr_p[which(Cr_p$Cr_Adj.P < 0.05),]
+Cr_p <- Cr_p[order(Cr_p$Cr_Adj.P),]
+Cr_p
+```
+
+
+```{r}
+taxa_Cd<-Cd$all_models
+as.data.frame(Cr$p_fdr)
+taxa_p <- DropNA(as.data.frame(Cd$p_fdr), Var = "Cd$p_fdr")
+taxa_p[1]
+taxa_Cr[[1]]$coefficients
+
+df <- dat
+colnames(df) = gsub("nan", "Unclassified", colnames(df))
+df_otus <- dplyr::select(df, -c("public_client_id","BMI_CALC","sex","age","eGFR","vendor_dashboard","apoe","genotyping_technology","rs7412","rs429358","genome_vendor","Cr","Mn","Co","Cd","Ni","As","Cd","Pb"))
+
+df_otus <- as.data.frame(clr(as.matrix(df_otus)))
+df_select <- dplyr::select(df, c(1:18))
+df_otus <- cbind(df_select,df_otus)
+df <- df_otus
+
+Cd_beta <- c()
+Cdp <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(Cd$p) = gsub("nan", "Unclassified", names(Cd$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(Cd$all_models[names(Cd$p)])) {
+  Cdp[i] <- Cd$all_models[[i]]$coefficients[2,4]
+  Cd_beta[i] <- Cd$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(Cd$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- Cd$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+Cd_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, Cd_beta, Cdp)
+names(Cd_p) <- c("Genera","Family","Genus","Adj.P","Cd_Beta","Cd_Adj.P")
+Cd_p$Combined <- paste(Cd_p$Family,Cd_p$Genus)
+Cd_p$Cd_Adj.P <- p.adjust(Cd_p$Cd_Adj.P, method = "fdr", n = length(Cd_p$Cd_Adj.P))
+
+
+Cd_p <- Cd_p[which(Cd_p$Cd_Adj.P < 0.05),]
+Cd_p <- Cd_p[order(Cd_p$Cd_Adj.P),]
+Cd_p
+```
+
+
+
+
+```{r}
+Mn$significant_taxa
+Mn$all_models[[i]]$coefficients
+```
+
+
+```{r}
+taxa_Mn<-Mn$all_models
+as.data.frame(Mn$p_fdr)
+taxa_p <- DropNA(as.data.frame(Mn$p_fdr), Var = "Mn$p_fdr")
+taxa_p[1]
+taxa_Mn[[1]]$coefficients
+
+df <- dat
+colnames(df) = gsub("nan", "Unclassified", colnames(df))
+df_otus <- dplyr::select(df, -c("public_client_id","BMI_CALC","sex","age","eGFR","vendor_dashboard","apoe","genotyping_technology","rs7412","rs429358","genome_vendor","Cr","Mn","Co","Ni","As","Cd","Pb"))
+
+df_otus <- as.data.frame(clr(as.matrix(df_otus)))
+df_select <- dplyr::select(df, c(1:18))
+df_otus <- cbind(df_select,df_otus)
+df <- df_otus
+
+Mn_beta <- c()
+Mnp <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(Mn$p) = gsub("nan", "Unclassified", names(Mn$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(Mn$all_models[names(Mn$p)])) {
+  Mnp[i] <- Mn$all_models[[i]]$coefficients[2,4]
+  Mn_beta[i] <- Mn$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(Mn$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- Mn$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+Mn_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, Mn_beta, Mnp)
+names(Mn_p) <- c("Genera","Family","Genus","Adj.P","Mn_Beta","Mn_Adj.P")
+Mn_p$Combined <- paste(Mn_p$Family,Mn_p$Genus)
+Mn_p$Mn_Adj.P <- p.adjust(Mn_p$Mn_Adj.P, method = "fdr", n = length(Mn_p$Mn_Adj.P))
+
+
+Mn_p <- Mn_p[which(Mn_p$Mn_Adj.P < 0.05),]
+Mn_p <- Mn_p[order(Mn_p$Mn_Adj.P),]
+Mn_p
+```
+
+
+```{r}
+df_otus_y <- dplyr::select(df_otus, c('Mn',paste("taxa_",Mn_p$Genera,sep=""),'public_client_id'))
+
+breaks <- quantile(df_otus_y$Mn, c(.67,.99, 1))
+breaks <- c(0, breaks)
+labels <- c('0-0.50','0.51-4.057','4.058-33.1')
+level <- cut(df_otus_y$Mn, breaks = breaks, labels = labels)
+df_otus_y <- cbind(df_otus_y, level)
+df_otus_y
+
+df_otus_y <- dplyr::select(df_otus, c('Mn',paste("taxa_",Mn_p$Genera,sep="")))
+
+breaks <- quantile(df_otus_y$Mn, c(.67,.99, 1))
+breaks <- c(0, breaks)
+labels <- c('0-0.50','0.51-4.057','4.058-33.1')
+level <- cut(df_otus_y$Mn, breaks = breaks, labels = labels)
+df_otus_y <- cbind(df_otus_y, level)
+df_otus_y
+
+colnames(df_otus_y) = gsub("Unclassified", "nan", colnames(df_otus_y))
+
+y_df <- Mn_p$Genera
+y_df = gsub("Unclassified", "nan", y_df)
+
+myplots <- list()
+for (genera in 1:length(Mn_p$Genera)) {
+  y_name <- paste("taxa_",y_df[genera],sep="")
+  myplots[[genera]] <- local({
+    genera <- genera
+    plt <- ggplot(data = df_otus_y, aes(x = Mn, y = .data[[y_name]])) +
+    geom_jitter(aes(color = factor(level)), cex = 1, size = 0.05)+
+    geom_smooth(method = "lm", formula = y ~ x, aes(group = 1)) +
+    #geom_boxplot(aes(color = factor(level)), alpha = 0.2, width = 0.5, position = position_dodge(preserve = "single"))+
+    ggtitle(label = paste(Mn_p$Family[genera],"\n",Mn_p$Genus[genera],sep="")) +
+    scale_x_log10(name = bquote(log[10]~"(Mn) in Sample"))+
+    #scale_x_continuous(name ="Dose (Mn)", trans = "log10")+
+    #xlab("log10(Mn Level)")+
+    labs(color = 'Mn sample dosage', y = ifelse((genera == 1 | genera == 5),"CLR Abundance","")) +
+    coord_cartesian(clip="off")+
+    theme(axis.line=element_blank(),plot.title=element_text(size=6))
+  })
+}
+
+final <- ggarrange(plotlist = myplots, labels = LETTERS[1:7], legend = "top", align = "hv", common.legend = TRUE, nrow = 2, ncol = 4)
+
+ggsave(
+  "Mn_final.png",
+  plot = final,
+  device = NULL,
+  path = NULL,
+  scale = 1.5,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL)
+```
+
+
+```{r}
+Co$significant_taxa
+```
+
+
+```{r}
+taxa_Co<-Co$all_models
+as.data.frame(Co$p_fdr)
+taxa_p <- DropNA(as.data.frame(Co$p_fdr), Var = "Co$p_fdr")
+taxa_p[1]
+taxa_Co[[1]]$coefficients
+
+Co_beta <- c()
+Cop <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(Co$p) = gsub("nan", "Unclassified", names(Co$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(Co$all_models[names(Co$p)])) {
+  Cop[i] <- Co$all_models[[i]]$coefficients[2,4]
+  Co_beta[i] <- Co$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(Co$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- Co$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+Co_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, Co_beta, Cop)
+names(Co_p) <- c("Genera","Family","Genus","Adj.P","Co_Beta","Co_Adj.P")
+Co_p$Combined <- paste(Co_p$Family,Co_p$Genus)
+Co_p$Co_Adj.P <- p.adjust(Co_p$Co_Adj.P, method = "fdr", n = length(Co_p$Co_Adj.P))
+
+
+Co_p <- Co_p[which(Co_p$Co_Adj.P < 0.05),]
+Co_p <- Co_p[order(Co_p$Co_Adj.P),]
+Co_p
+```
+
+
+```{r}
+Ni$significant_taxa
+```
+
+
+```{r}
+taxa_Ni<-Ni$all_models
+as.data.frame(Ni$p_fdr)
+taxa_p <- DropNA(as.data.frame(Ni$p_fdr), Var = "Ni$p_fdr")
+taxa_p[1]
+taxa_Ni[[1]]$coefficients
+
+Ni_beta <- c()
+Nip <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(Ni$p) = gsub("nan", "Unclassified", names(Ni$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(Ni$all_models[names(Ni$p)])) {
+  Nip[i] <- Ni$all_models[[i]]$coefficients[2,4]
+  Ni_beta[i] <- Ni$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(Ni$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- Ni$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+Ni_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, Ni_beta, Nip)
+names(Ni_p) <- c("Genera","Family","Genus","Adj.P","Ni_Beta","Ni_Adj.P")
+Ni_p$Combined <- paste(Ni_p$Family,Ni_p$Genus)
+Ni_p$Ni_Adj.P <- p.adjust(Ni_p$Ni_Adj.P, method = "fdr", n = length(Ni_p$Ni_Adj.P))
+
+
+Ni_p <- Ni_p[which(Ni_p$Ni_Adj.P < 0.05),]
+Ni_p <- Ni_p[order(Ni_p$Ni_Adj.P),]
+Ni_p
+```
+
+
+```{r}
+As$significant_taxa
+```
+
+
+```{r}
+taxa_As<-As$all_models
+as.data.frame(As$p_fdr)
+taxa_p <- DropNA(as.data.frame(As$p_fdr), Var = "As$p_fdr")
+taxa_p[1]
+taxa_As[[1]]$coefficients
+
+As_beta <- c()
+Asp <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(As$p) = gsub("nan", "Unclassified", names(As$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(As$all_models[names(As$p)])) {
+  Asp[i] <- As$all_models[[i]]$coefficients[2,4]
+  As_beta[i] <- As$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(As$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- As$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+As_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, As_beta, Asp)
+names(As_p) <- c("Genera","Family","Genus","Adj.P","As_Beta","As_Adj.P")
+As_p$Combined <- paste(As_p$Family,As_p$Genus)
+As_p$As_Adj.P <- p.adjust(As_p$As_Adj.P, method = "fdr", n = length(As_p$As_Adj.P))
+
+
+As_p <- As_p[which(As_p$As_Adj.P < 0.05),]
+As_p <- As_p[order(As_p$As_Adj.P),]
+As_p
+```
+
+
+```{r}
+df_otus_y <- dplyr::select(df_otus, c('As',paste("taxa_",Mn_p$Genera,sep=""),'public_client_id'))
+
+breaks <- quantile(df_otus_y$As, c(.67,.99, 1))
+breaks <- c(0, breaks)
+labels <- c('0-0.50','0.51-4.057','4.058-33.1')
+level <- cut(df_otus_y$As, breaks = breaks, labels = labels)
+df_otus_y <- cbind(df_otus_y, level)
+df_otus_y
+
+df_otus_y <- dplyr::select(df_otus, c('As',paste("taxa_",As_p$Genera,sep="")))
+
+breaks <- quantile(df_otus_y$As, c(.67,.99, 1))
+breaks <- c(0, breaks)
+labels <- c('0-0.50','0.51-4.057','4.058-33.1')
+level <- cut(df_otus_y$As, breaks = breaks, labels = labels)
+df_otus_y <- cbind(df_otus_y, level)
+df_otus_y
+
+colnames(df_otus_y) = gsub("Unclassified", "nan", colnames(df_otus_y))
+
+y_df <- As_p$Genera
+y_df = gsub("Unclassified", "nan", y_df)
+
+myplots <- list()
+for (genera in 1:length(As_p$Genera)) {
+  y_name <- paste("taxa_",y_df[genera],sep="")
+  myplots[[genera]] <- local({
+    genera <- genera
+    plt <- ggplot(data = df_otus_y, aes(x = As, y = .data[[y_name]])) +
+    geom_jitter(aes(color = factor(level)), cex = 1, size = 0.05)+
+    geom_smooth(method = "lm", formula = y ~ x, aes(group = 1)) +
+    #geom_boxplot(aes(color = factor(level)), alpha = 0.2, width = 0.5, position = position_dodge(preserve = "single"))+
+    ggtitle(label = paste(As_p$Family[genera],"\n",As_p$Genus[genera],sep="")) +
+    scale_x_log10(name = bquote(log[10]~"(As) in Sample"))+
+    #scale_x_continuous(name ="Dose (As)", trans = "log10")+
+    #xlab("log10(As Level)")+
+    labs(color = 'As sample dosage', y = ifelse((genera == 1 | genera == 5),"CLR Abundance","")) +
+    coord_cartesian(clip="off")+
+    theme(axis.line=element_blank(),plot.title=element_text(size=6))
+  })
+}
+
+final <- ggarrange(plotlist = myplots, labels = LETTERS[1:7], legend = "top", align = "hv", common.legend = TRUE, nrow = 2, ncol = 4)
+
+ggsave(
+  "As_final.png",
+  plot = final,
+  device = NULL,
+  path = NULL,
+  scale = 1.5,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL)
+```
+
+```{r}
+Pb$significant_taxa
+```
+
+
+```{r}
+taxa_Pb<-Pb$all_models
+as.data.frame(Pb$p_fdr)
+taxa_p <- DropNA(as.data.frame(Pb$p_fdr), Var = "Pb$p_fdr")
+taxa_p[1]
+taxa_Pb[[1]]$coefficients
+
+Pb_beta <- c()
+Pbp <- c()
+taxa_names <- c()
+family_names <- c()
+genus_names <- c()
+adj_p <- c()
+names(Pb$p) = gsub("nan", "Unclassified", names(Pb$p))
+
+#Add all the p values and metadata to the right dfs:
+for (i in 1:length(Pb$all_models[names(Pb$p)])) {
+  Pbp[i] <- Pb$all_models[[i]]$coefficients[2,4]
+  Pb_beta[i] <- Pb$all_models[[i]]$coefficients[2,1]
+  taxa_names[i] <- names(Pb$p)[i]
+  family_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][5]
+  genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+  adj_p[i] <- Pb$p_fdr[[i]]
+}
+genus_names[i] <- strsplit(taxa_names[i],'.',fixed=TRUE)[[1]][6]
+Pb_p <- bind_cols(taxa_names,family_names,genus_names, adj_p, Pb_beta, Pbp)
+names(Pb_p) <- c("Genera","Family","Genus","Adj.P","Pb_Beta","Pb_Adj.P")
+Pb_p$Combined <- paste(Pb_p$Family,Pb_p$Genus)
+Pb_p$Pb_Adj.P <- p.adjust(Pb_p$Pb_Adj.P, method = "fdr", n = length(Pb_p$Pb_Adj.P))
+
+
+Pb_p <- Pb_p[which(Pb_p$Pb_Adj.P < 0.05),]
+Pb_p <- Pb_p[order(Pb_p$Pb_Adj.P),]
+Pb_p
+```
+
+
+```{r}
+df_otus_y <- dplyr::select(df_otus, c('Pb',paste("taxa_",Pb_p$Genera,sep=""),'public_client_id'))
+
+breaks <- quantile(df_otus_y$Pb, c(.67,.99, 1))
+breaks <- c(0, breaks)
+labels <- c('0-0.50','0.51-4.057','4.058-33.1')
+level <- cut(df_otus_y$Pb, breaks = breaks, labels = labels)
+df_otus_y <- cbind(df_otus_y, level)
+df_otus_y
+
+df_otus_y <- dplyr::select(df_otus, c('Pb',paste("taxa_",Pb_p$Genera,sep="")))
+
+breaks <- quantile(df_otus_y$Pb, c(.67,.99, 1))
+breaks <- c(0, breaks)
+labels <- c('0-0.50','0.51-4.057','4.058-33.1')
+level <- cut(df_otus_y$Pb, breaks = breaks, labels = labels)
+df_otus_y <- cbind(df_otus_y, level)
+df_otus_y
+
+colnames(df_otus_y) = gsub("Unclassified", "nan", colnames(df_otus_y))
+
+y_df <- Pb_p$Genera
+y_df = gsub("Unclassified", "nan", y_df)
+
+myplots <- list()
+for (genera in 1:length(Pb_p$Genera)) {
+  y_name <- paste("taxa_",y_df[genera],sep="")
+  myplots[[genera]] <- local({
+    genera <- genera
+    plt <- ggplot(data = df_otus_y, aes(x = Pb, y = .data[[y_name]])) +
+    #geom_jitter(aes(color = factor(level)), cex = 1, size = 0.05)+
+    #geom_smooth(method = "lm", formula = y ~ x, aes(group = 1)) +
+    geom_boxplot(aes(color = factor(level)), alpha = 0.2, width = 0.5, position = position_dodge(preserve = "single"))+
+    ggtitle(label = paste(Pb_p$Family[genera],"\n",Pb_p$Genus[genera],sep="")) +
+    scale_x_log10(name = bquote(log[10]~"(Pb) in Sample"))+
+    #scale_x_continuous(name ="Dose (As)", trans = "log10")+
+    #xlab("log10(As Level)")+
+    labs(color = 'Pba sample dosage', y = ifelse((genera == 1 | genera == 5),"CLR Abundance","")) +
+    coord_cartesian(clip="off")+
+    theme(axis.line=element_blank(),plot.title=element_text(size=6))
+  })
+}
+
+final <- ggarrange(plotlist = myplots, labels = LETTERS[1:7], legend = "top", align = "hv", common.legend = TRUE, nrow = 2, ncol = 4)
+
+ggsave(
+  "Pb.png",
+  plot = final,
+  device = NULL,
+  path = NULL,
+  scale = 1.5,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

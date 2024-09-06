@@ -1,0 +1,320 @@
+---
+title: "Frailty Analysis - Metabolomics - 8-30-2024"
+author: "Johannes P. Johnson-Martinez (a.k.a. James Johnson), PhD"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+#load some useful libraries
+library(limma)
+library(edgeR)
+library(sns)
+library(data.table)
+library(tidyr)
+#library(tidyverse)
+library(sjmisc)
+require(foreign)
+library(foreign)
+require(ggplot2)
+require(MASS)
+require(Hmisc)
+require(reshape2)
+library(stringr)
+library(rlist)
+library(rlang)
+library(forcats)
+library(dplyr)
+library(ggh4x)
+require(tidyselect)
+library(DataCombine)
+library(ggrepel)
+library(ggbeeswarm)
+library(ggsignif)
+library(ggpubr)
+#library(btools)
+library(ggpmisc)
+library(quantreg)
+library(broom)
+library(gginnards)
+library(broom.mixed)
+library(scales)
+library(sommer)
+library(gplots)
+library(ggbreak)
+library(ggrepel)
+library(stringr)
+```
+
+```{r}
+frailty <- read.csv("ba_frailty_met.csv")
+frailty$public_client_id <- factor(frailty$public_client_id)
+frailty$sex <- factor(frailty$sex)
+names(frailty)[142:ncol(frailty)] <- sapply(str_remove_all(names(frailty)[142:ncol(frailty)],"X"),"[") 
+frailty[,15:ncol(frailty)] <- lapply(frailty[,15:ncol(frailty)], as.numeric)
+
+
+wrap_strings  <- function(vector_strings,width){as.character(sapply(vector_strings,FUN=function(x){paste(strwrap(x,width=width), collapse="\n")}))}
+frailty
+```
+
+```{r}
+labs_list <- names(frailty[,c("ALAT..SGPT.","ALBUMIN","ALKALINE.PHOSPHATASE","BILIRUBIN..TOTAL","CALCIUM","CARBON.DIOXIDE..CO2.","CHLORIDE","CHOLESTEROL..TOTAL","CREATININE.ENZ..SER","CRP.HIGH.SENSITIVITY","FERRITIN","GLOBULIN","GLUCOSE","GLYCOHEMOGLOBIN.A1C","HDL.CHOL.DIRECT","INSULIN","LDL.CHOL.CALCULATION","LINOLEIC_ACID","OMEGA.3.INDEX","POTASSIUM","PROTEIN","SODIUM","TRIGLYCERIDES","UREA.NITROGEN","URIC.ACID","VITAMIN.D..25.OH.TOT")])
+frailty_wolabs <- frailty[,c(142:ncol(frailty))] 
+frailty_wlabs <- frailty[,names(frailty) %in% labs_list]
+frailty <- cbind(frailty[,c(1:14)],frailty_wlabs,frailty_wolabs)
+frailty
+
+labs_list <- c("alanine transaminase\n(ALT/SGPT)", 
+               "albumin",
+               "alkaline phosphate",
+               "bilirubin total",
+               "calcium",
+               "CO2",
+               "chloride",
+               "total cholesterol",
+               "creatinine",
+               "C-reactive protein (CRP)",
+               "ferritin",
+               "globulin",
+               "glucose",
+               "glycohemoglobin A1c (HbA1C)",
+               "HDL",
+               "insulin",
+               "LDL",
+               "linoleic acid",
+               "omega-3\nindex",
+               "potassium",
+               "protein",
+               "sodium",
+               "triglycerides",
+               "urea nitrogen",
+               "uric acid",
+               "Vitamin D-25 OH total")
+names(frailty)[15:40] <- labs_list
+names(frailty)[10:12] <- c('frailty index', 'Shannon Diversity', 'BMI')
+names(frailty)[6:9] <-c('Bray-Curtis Uniqueness','Weighted UNIFRAC Uniqueness','butyrate flux', 'propionate flux')
+```
+```{r}
+frailty
+```
+
+
+```{r}
+for(col in names(frailty)[41:ncol(frailty)]) {
+  frailty[is.na(frailty[,41:ncol(frailty)][,col]), col] <- median(frailty[,41:ncol(frailty)][,col], na.rm = TRUE)
+}
+frailty
+```
+
+```{r}
+na_rows <- which(apply(is.na(frailty), 2, any))
+# This will give you a logical vector where TRUE indicates that the row has at least one NA
+print(na_rows)
+
+frailty <- frailty[,-c(na_rows)]
+
+na_rows <- which(apply(is.na(frailty), 2, any))
+# This will give you a logical vector where TRUE indicates that the row has at least one NA
+print(na_rows)
+
+```
+```{r}
+frailty
+```
+
+
+```{r}
+countdf <- t(as.matrix(frailty[,41:ncol(frailty)]))
+
+# Import data
+meta <- read.csv(file = 'metabolomics_fullmetadata.csv')
+
+countdf
+
+# Design linear regression models using lmFit and eBayes with help LIMMA
+# This code adapted from Christian Diener, PhD:
+design <- model.matrix(~get('frailty index') + sex + age + BMI + PC1 + PC2 + PC3 + PC4, frailty) # Covariates: sex, age, BMI, eGFR
+dge <- DGEList(counts=countdf)  # Where `count_matrix` is the matrix mentioned above
+#dge <- calcNormFactors(dge)  # Normalize the matrix (this step only for CORNCOB/microbiome data)
+logCPM <- cpm(dge, log=TRUE)  # Takes the log of the data
+fit <- lmFit(logCPM, design)  # Fits the model for all metabolites
+fit <- eBayes(fit)  # Stabilizes the variances
+```
+```{r}
+meta <- meta[meta$BIOCHEMICAL_NAME != "", ]
+meta
+```
+
+```{r}
+frailty
+```
+
+
+```{r}
+re_frailty <- topTable(fit, coef = 2, genelist = meta$CHEMICAL_ID, sort="p", number="none")  # Select the significant models by coefficient 2
+
+indices <- match(rownames(re_frailty), meta$CHEMICAL_ID) # associate column of names with index of metab
+re_frailty[1] <- meta$BIOCHEMICAL_NAME[indices]
+names(re_frailty)[1] <- 'BIOCHEMICAL_NAME'
+re_frailty
+```
+
+```{r}
+
+# Get the column names of 'frailty_df' from column 41 onwards
+cols <- colnames(frailty)[41:ncol(frailty)]
+
+# Find the matching 'BIOCHEMICAL_NAME' for each column
+new_cols <- sapply(cols, function(x) {
+  if (x %in% rownames(re_frailty[re_frailty$adj.P.Val < 0.05,])) {
+    return(re_frailty[re_frailty$adj.P.Val < 0.05,][x, "BIOCHEMICAL_NAME"])
+  } else {
+    return(x)
+  }
+})
+
+library(dplyr)
+library(purrr)
+
+df_filtered_frailty <- frailty[41:ncol(frailty)]
+names(df_filtered_frailty) <- new_cols
+
+# Filter columns whose names are not a string of numbers
+df_filtered_frailty <- df_filtered_frailty %>% select_if(map_lgl(names(df_filtered_frailty), ~ !grepl("^\\d+$", .)))
+
+
+df_filtered_frailty
+
+
+select_frailty <- cbind(frailty[,1:40],df_filtered_frailty)
+select_frailty
+```
+
+
+```{r}
+p_frailty <- re_frailty[re_frailty$adj.P.Val < 0.05,] # create df of just significant adj P value results
+p_frailty <- p_frailty[order(p_frailty$adj.P.Val),] # order by adj P value
+
+sig_frailty <- p_frailty[which(p_frailty$adj.P.Val < 0.05),]
+select_frailty
+```
+
+```{r}
+# Read the data from the CSV file
+df_matrix <- select_frailty
+working_set_list <- colnames(df_matrix)[41:ncol(df_matrix)]
+
+# Select the columns that contain the taxa data
+keep_cols <- working_set_list
+
+# Create a new data frame that only contains the selected columns
+df_matrix_filtered <- df_matrix[,keep_cols]
+
+# Add the BMF status column to the new data frame
+df_matrix_filtered <- cbind(df_matrix[,10],df_matrix_filtered)
+names(df_matrix_filtered)[1] <- 'frailty'
+
+# Convert the set$Genera vector to a vector of characters
+set_metab_characters <- unlist(working_set_list)
+
+# Filter the df_matrix data frame to only include the taxa that are present in the set of metab that are being studied
+vec <- names(select_frailty)[41:ncol(select_frailty)]
+
+# Filter the df_matrix data frame to only include the taxa that are present in the set of metab that are being studied
+vec
+```
+
+
+```{r}
+vars <- c('age', "BMI","frailty index","Bray-Curtis Uniqueness","propionate flux","butyrate flux","Shannon Diversity",labs_list)
+
+df_matrix <- df_matrix[complete.cases(df_matrix),]
+df_matrix <- na.omit(df_matrix)
+#df_matrix <- df_matrix[sapply(df_matrix, is.finite),] 
+df_matrix <- df_matrix[sapply(df_matrix, is.numeric),]
+metab <- colnames(df_matrix[,vec])
+metab
+
+```
+
+
+```{r}
+
+# Subset df_matrix for taxa and vars
+df_metab <- df_matrix[, metab]
+df_vars <- df_matrix[, vars]
+
+vars
+metab
+rownames(df_vars) <- NULL
+rownames(df_metab) <- NULL
+
+# Initialize an empty matrix to store correlations
+correlations <- matrix(nrow = length(metab), ncol = length(vars),
+                       dimnames = list(metab, vars))
+
+# Compute correlations
+for (i in seq_along(metab)) {
+  for (j in seq_along(vars)) {
+    # Ensure the columns are numeric
+    if (is.numeric(df_metab[, i]) && is.numeric(df_vars[, j])) {
+      # Remove NA values
+      metab_vector <- na.omit(df_metab[, i])
+      vars_vector <- na.omit(df_vars[, j])
+      # Check for constant columns
+      if (sd(metab_vector) != 0 && sd(vars_vector) != 0) {
+        correlations[i, j] <- cor(metab_vector, vars_vector)
+      } else {
+        correlations[i, j] <- NA
+      }
+    }
+  }
+}
+
+correlations <- na.omit(correlations)
+```
+
+
+```{r}
+df_matrix <- na.omit(df_matrix)  # Remove rows with missing values
+
+# Compute distance matrix for rows and columns
+dist_matrix_rows <- dist(correlations, method = "euclidean")
+dist_matrix_cols <- dist(t(correlations), method = "euclidean")
+
+# Check for NA, NaN, or Inf values in the distance matrices
+if(any(is.na(dist_matrix_rows)) || any(is.na(dist_matrix_cols)) || 
+   any(is.infinite(dist_matrix_rows)) || any(is.infinite(dist_matrix_cols))) {
+  stop("The distance matrices contain NA, NaN, or Inf values.")
+}
+
+
+rownames(correlations) <- wrap_strings(rownames(correlations),80)
+
+png("frailty_hm_met.png", width = 6000, height = 7500, res = 600)
+# Generate the heatmap with hierarchical clustering
+heatmap.2(correlations, 
+          main = "Correlation Heatmap", 
+          notecol="black",      # change font color of cell labels to black
+          density.info="none",  # turns off density plot inside heatmap
+          trace="none",         # turns off trace lines inside the heatmap
+          cexRow = 0.155, # sets row text size to 0.8
+          margins = c(12,9),    # widens margins around plot
+          col = colorRampPalette(c("blue", "white", "red"))(25),  # color scheme
+          Rowv = TRUE,
+          Colv = TRUE,) # enable hierarchical clustering for columns
+
+dev.off()
+
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
